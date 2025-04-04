@@ -1,0 +1,282 @@
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace Palette-O-Matic
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.Title = "Palette-O-Matic";
+
+            // If launched with command-line arguments, process them and exit
+            if (args.Length >= 2 && args[0] == "-run")
+            {
+                Execute(args);
+                InputAwait();
+                return;
+            }
+
+            // Interactive mode - allow multiple runs
+            while (true)
+            {
+                Console.Clear();
+                Console.WriteLine("Palette-O-Matic 1.2 - Thanks for using!");
+                Console.WriteLine("");
+                Console.WriteLine("IMPORTANT: Place .exe in the same directory as your image files AND your aco file. Only PNG are supported. Alpha channels are preserved.");
+                Console.WriteLine("Type '-run <ACO filename> <identifier>' and press Enter to initiate batch processing.");
+                Console.WriteLine("Example: -run WrathPalette.aco wp");
+                Console.WriteLine("Type 'exit' to quit the program.");
+                Console.WriteLine("");
+
+                string userInput = Console.ReadLine();
+
+                if (string.IsNullOrEmpty(userInput))
+                    continue;
+
+                if (userInput.Equals("exit", StringComparison.OrdinalIgnoreCase))
+                    break;
+
+                if (userInput.StartsWith("-run"))
+                {
+                    string[] inputArgs = userInput.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    Execute(inputArgs);
+                }
+                else
+                {
+                    Console.WriteLine("Invalid command. Please use '-run' or 'exit'.");
+                }
+
+                Console.WriteLine("Press any key to perform next operation");
+                Console.ReadKey();
+            }
+        }
+
+        static void Execute(string[] args)
+        {
+            try
+            {
+                if (args.Length < 2)
+                {
+                    Console.WriteLine("You need to specify the ACO file name.");
+                    return;
+                }
+
+                string currentDirectory = Directory.GetCurrentDirectory();
+                string acoFileName = args[1];
+                string acoFilePath = Path.Combine(currentDirectory, acoFileName);
+
+                if (!File.Exists(acoFilePath))
+                {
+                    Console.WriteLine($"Error: ACO file '{acoFileName}' not found in the current directory.");
+                    return;
+                }
+
+                string identifier = args.Length > 2 ? args[2] : string.Empty;
+                Console.WriteLine($"ACO File Path: {acoFilePath}");
+                if (!string.IsNullOrEmpty(identifier))
+                {
+                    Console.WriteLine($"Identifier: {identifier}");
+                }
+
+                var palette = LoadACOPalette(acoFilePath);
+                Console.WriteLine("Palette loaded successfully.");
+
+                ProcessImages(currentDirectory, palette, false, identifier);
+                Console.WriteLine("Great Success! Processing complete.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error during processing: {ex.Message}");
+            }
+        }
+
+        static void InputAwait()
+        {
+            Console.WriteLine("Press any key to perform next operation");
+            Console.ReadKey();
+        }
+
+        static List<Color> LoadACOPalette(string filePath)
+        {
+            List<Color> palette = new();
+
+            using (BinaryReader reader = new BinaryReader(File.Open(filePath, FileMode.Open)))
+            {
+                int colorCount = reader.ReadInt16();
+                Console.WriteLine($"Palette file color count: {colorCount}");
+
+                short version = reader.ReadInt16();
+                Console.WriteLine($"Palette file ACO Version: {version}");
+
+                for (int i = 0; i < colorCount; i++)
+                {
+                    short colorSpace = reader.ReadInt16();
+
+                    if (colorSpace == 0) // RGB
+                    {
+                        int r16 = reader.ReadUInt16();
+                        int g16 = reader.ReadUInt16();
+                        int b16 = reader.ReadUInt16();
+
+                        int r = Math.Clamp(r16 / 256, 0, 255);
+                        int g = Math.Clamp(g16 / 256, 0, 255);
+                        int b = Math.Clamp(b16 / 256, 0, 255);
+
+                        reader.ReadInt16();
+
+                        palette.Add(Color.FromArgb(r, g, b));
+                        Console.WriteLine($"Color {i}: R={r}, G={g}, B={b}");
+                    }
+                    else
+                    {
+                        reader.BaseStream.Seek(8, SeekOrigin.Current);
+                        Console.WriteLine($"Skipping non-RGB color space {colorSpace}");
+                        palette.Add(Color.Black);
+                    }
+                }
+            }
+
+            return palette;
+        }
+
+        //Heavy Lifting
+        static void ProcessImages(string directoryPath, List<Color> palette, bool printConversionLog, string identifier)
+        {
+            var imageFiles = Directory.GetFiles(directoryPath)
+                .Where(f => f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+                           f.EndsWith(".tga", StringComparison.OrdinalIgnoreCase));
+
+            foreach (var file in imageFiles)
+            {
+                Console.WriteLine($"Processing {file}...");
+
+                bool isTga = file.EndsWith(".tga", StringComparison.OrdinalIgnoreCase);
+
+                using (Bitmap originalBmp = isTga ? LoadTgaAsBitmap(file) : new Bitmap(file))
+                {
+                    using (Bitmap newBmp = new Bitmap(originalBmp.Width, originalBmp.Height, PixelFormat.Format32bppArgb))
+                    {
+                        for (int y = 0; y < originalBmp.Height; y++)
+                        {
+                            for (int x = 0; x < originalBmp.Width; x++)
+                            {
+                                Color originalPixel = originalBmp.GetPixel(x, y);
+                                Color newRgb = FindClosestColor(originalPixel, palette);
+                                Color finalPixel = Color.FromArgb(
+                                    originalPixel.A,
+                                    newRgb.R,
+                                    newRgb.G,
+                                    newRgb.B
+                                );
+
+                                newBmp.SetPixel(x, y, finalPixel);
+
+                                if (printConversionLog)
+                                {
+                                    Console.WriteLine(
+                                        $"Original R:{originalPixel.R}, G:{originalPixel.G}, B:{originalPixel.B}, A:{originalPixel.A} → " +
+                                        $"Palettised R:{newRgb.R}, G:{newRgb.G}, B:{newRgb.B}, A:{originalPixel.A}"
+                                    );
+                                }
+                            }
+                        }
+
+                        string outputFile = Path.Combine(directoryPath, identifier + "_" + Path.GetFileName(file));
+
+                        if (isTga)
+                        {
+                            SaveBitmapAsTga(newBmp, outputFile);
+                        }
+                        else
+                        {
+                            newBmp.Save(outputFile, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+
+                        Console.WriteLine($"Saved to {outputFile}.");
+                    }
+                }
+            }
+        }
+
+        static Bitmap LoadTgaAsBitmap(string filePath)
+        {
+            using (var tgaImage = Pfim.Pfimage.FromFile(filePath))
+            {
+                PixelFormat format = tgaImage.Format == Pfim.ImageFormat.Rgba32 ?
+                    PixelFormat.Format32bppArgb : PixelFormat.Format24bppRgb;
+
+                var bmp = new Bitmap(tgaImage.Width, tgaImage.Height, format);
+                var bmpData = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+                    ImageLockMode.WriteOnly, format);
+
+                try
+                {
+                    Marshal.Copy(tgaImage.Data, 0, bmpData.Scan0, tgaImage.Data.Length);
+                }
+                finally
+                {
+                    bmp.UnlockBits(bmpData);
+                }
+
+                return bmp;
+            }
+        }
+
+        static void SaveBitmapAsTga(Bitmap bmp, string outputPath)
+        {
+            var bmpData = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+                ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+
+            try
+            {
+                byte[] header = new byte[18];
+                header[2] = 2;
+                header[12] = (byte)(bmp.Width & 0xFF);
+                header[13] = (byte)(bmp.Width >> 8);
+                header[14] = (byte)(bmp.Height & 0xFF);
+                header[15] = (byte)(bmp.Height >> 8);
+                header[16] = 32;
+                header[17] = 0x20;
+
+                using (var fs = new FileStream(outputPath, FileMode.Create))
+                {
+                    fs.Write(header, 0, 18);
+
+                    byte[] pixelData = new byte[bmp.Width * 4];
+                    IntPtr scan0 = bmpData.Scan0;
+
+                    for (int y = 0; y < bmp.Height; y++)
+                    {
+                        Marshal.Copy(scan0 + y * bmpData.Stride, pixelData, 0, pixelData.Length);
+                        fs.Write(pixelData, 0, pixelData.Length);
+                    }
+
+                    byte[] footer = new byte[26];
+                    Encoding.ASCII.GetBytes("TRUEVISION-XFILE.\0").CopyTo(footer, 8);
+                    fs.Write(footer, 0, 26);
+                }
+            }
+            finally
+            {
+                bmp.UnlockBits(bmpData);
+            }
+        }
+
+        static Color FindClosestColor(Color color, List<Color> palette)
+        {
+            return palette.OrderBy(c => ColorDistance(color, c)).First();
+        }
+
+        static double ColorDistance(Color c1, Color c2)
+        {
+            int rDiff = c1.R - c2.R;
+            int gDiff = c1.G - c2.G;
+            int bDiff = c1.B - c2.B;
+
+            return Math.Sqrt(rDiff * rDiff + gDiff * gDiff + bDiff * bDiff);
+        }
+    }
+}
